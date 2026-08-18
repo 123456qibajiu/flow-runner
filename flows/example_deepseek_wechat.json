@@ -1,0 +1,17 @@
+{
+  "name": "DeepSeek→微信打卡",
+  "created": "2026-08-18",
+  "steps": [
+    {"type": "switch_window", "params": {"window_title": "DeepSeek"}},
+    {"type": "wait", "params": {"seconds": 1}},
+    {"type": "hotkey", "params": {"keys": "ctrl+a"}},
+    {"type": "wait", "params": {"seconds": 0.3}},
+    {"type": "hotkey", "params": {"keys": "ctrl+c"}},
+    {"type": "wait", "params": {"seconds": 0.5}},
+    {"type": "switch_window", "params": {"window_title": "微信"}},
+    {"type": "wait", "params": {"seconds": 1}},
+    {"type": "hotkey", "params": {"keys": "ctrl+v"}},
+    {"type": "wait", "params": {"seconds": 0.5}},
+    {"type": "hotkey", "params": {"keys": "enter"}}
+  ]
+}
