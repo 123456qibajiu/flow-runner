@@ -1,14 +1,32 @@
 """
 RPA 引擎 - 负责控件识别、步骤执行、流程存取
 
-v1.5: 点击可靠性大幅增强
-- 智能点击带回退：先按控件名/ID匹配，失败后按「窗口内相对位置」点击
-- 坐标点击自动绑定窗口：窗口挪了位置，点击依然准确
+v1.6: 修复自绘界面(微信/浏览器/Electron)捕获必然失败的缺陷
+- 根因: ControlFromCursor 对自绘界面返回"窗口本身"，旧版 _find_top_window
+  只向上找父级、不检查自身，导致 window_title 为空、兜底坐标缺失，
+  捕获出来的步骤回放必然报错。
+- 修复 1: _find_top_window 先检查控件自身是否为窗口，再走父级链，
+  最后按进程 ID 兜底 —— 三重保障。
+- 修复 2: 回放时窗口匹配增加"类名兜底"（标题会变，类名不会），
+  浏览器换页面后流程依然有效。
+- 修复 3: 捕获时始终记录鼠标绝对坐标作为最后防线。
+- 修复 4: 显式声明 DPI 感知，高分屏缩放场景坐标不错位。
 """
 
 import time
 import json
+import ctypes
 import webbrowser
+
+# DPI 感知: 让 GetCursorPos/SetCursorPos 与 UIA 矩形同处物理像素空间。
+# 高分屏缩放(125%/150%)场景下若不声明，鼠标坐标会被系统虚拟化导致点击错位。
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 import uiautomation as auto
 import pyautogui
@@ -29,6 +47,7 @@ STEP_TYPES = {
 
 PARAM_LABELS = {
     "window_title": "窗口标题",
+    "win_class": "窗口类名",
     "control_type": "控件类型",
     "name": "控件名称",
     "automation_id": "自动化ID",
@@ -64,8 +83,6 @@ class Step:
             name = p.get("name", "") or p.get("automation_id", "")
             win = p.get("window_title", "?")
             if name:
-                if p.get("rel_x") is not None:
-                    return f'点击 [{name}] @ {win} (含位置兜底)'
                 return f'点击 [{name}] @ {win}'
             if p.get("rel_x") is not None:
                 return f'点击 窗口内({p.get("rel_x")},{p.get("rel_y")}) @ {win}'
@@ -96,7 +113,13 @@ class ElementCapture:
 
     @staticmethod
     def capture_at_cursor():
-        """获取当前鼠标位置的控件信息（含窗口内相对位置，用于兜底点击）"""
+        """获取当前鼠标位置的控件信息。
+
+        关键设计: 无论控件识别是否成功，都保证记录:
+        - 所属窗口(标题+类名) → 回放时能找到窗口
+        - 鼠标位置的窗口内相对坐标 → 自绘界面的点击兜底
+        - 鼠标绝对坐标 → 最后防线
+        """
         try:
             control = auto.ControlFromCursor()
         except Exception:
@@ -104,50 +127,79 @@ class ElementCapture:
         if control is None:
             return None
 
+        pos = pyautogui.position()
         window = ElementCapture._find_top_window(control)
         win_title = window.Name if window else ""
+        win_class = window.ClassName if window else ""
 
-        # 计算控件中心相对窗口左上角的位置 —— 这是回放时的兜底坐标
+        # 鼠标位置相对窗口左上角的偏移 —— 自绘界面回放点击的主力坐标。
+        # 注意用鼠标实际位置而非控件中心: 自绘界面拿到的"控件"往往就是
+        # 整个窗口，控件中心 ≠ 用户想点的地方。
         rel_x = rel_y = None
         if window is not None:
             try:
-                rect = control.BoundingRectangle
-                win_rect = window.BoundingRectangle
-                cx = (rect.left + rect.right) // 2
-                cy = (rect.top + rect.bottom) // 2
-                rel_x = cx - win_rect.left
-                rel_y = cy - win_rect.top
+                wrect = window.BoundingRectangle
+                rel_x = pos.x - wrect.left
+                rel_y = pos.y - wrect.top
             except Exception:
                 pass
 
         return {
             "window_title": win_title,
+            "win_class": win_class,
             "control_type": control.ControlTypeName,
             "name": control.Name or "",
             "automation_id": control.AutomationId or "",
             "class_name": control.ClassName or "",
             "rel_x": rel_x,
             "rel_y": rel_y,
+            "x": pos.x,
+            "y": pos.y,
         }
 
     @staticmethod
     def _find_top_window(control):
-        """向上遍历找到顶层窗口控件"""
+        """找到控件所属的顶层窗口。
+
+        v1.6 修复: 自绘界面(微信/Qt/Electron)上 ControlFromCursor 返回的
+        往往就是窗口本身 —— 旧版只检查父级链导致返回 None，
+        捕获出的步骤 window_title 为空、无兜底坐标，回放必然失败。
+        """
+        # 1) 控件自身就是窗口
+        try:
+            if control.ControlType == auto.ControlType.WindowControl:
+                return control
+        except Exception:
+            pass
+
+        # 2) 沿父级链向上找
         current = control
         for _ in range(30):
-            parent = current.GetParentControl()
+            try:
+                parent = current.GetParentControl()
+            except Exception:
+                break
             if parent is None:
                 break
             if parent.ControlType == auto.ControlType.WindowControl:
                 return parent
             current = parent
+
+        # 3) 按进程 ID 在顶层窗口中兜底查找
+        try:
+            pid = control.ProcessId
+            for child in auto.GetRootControl().GetChildren():
+                if (child.ProcessId == pid
+                        and child.ControlType == auto.ControlType.WindowControl):
+                    return child
+        except Exception:
+            pass
         return None
 
     @staticmethod
     def capture_cursor_pos():
-        """获取当前鼠标坐标。若能识别鼠标所在窗口，则记录窗口内相对坐标（窗口移动后依然有效）"""
+        """获取当前鼠标坐标（自动绑定所在窗口，记录类名）"""
         pos = pyautogui.position()
-
         try:
             control = auto.ControlFromCursor()
             if control:
@@ -156,12 +208,14 @@ class ElementCapture:
                     win_rect = window.BoundingRectangle
                     return {
                         "window_title": window.Name,
+                        "win_class": window.ClassName,
                         "rel_x": pos.x - win_rect.left,
                         "rel_y": pos.y - win_rect.top,
+                        "x": pos.x,
+                        "y": pos.y,
                     }
         except Exception:
             pass
-
         return {"x": pos.x, "y": pos.y}
 
     @staticmethod
@@ -226,20 +280,65 @@ class FlowRunner:
         elif t == "open_url":
             webbrowser.open(p.get("url", ""))
 
-    # ---------- 智能点击：控件匹配 → 窗口内位置兜底 ----------
+    # ---------- 窗口查找: 标题子串优先，类名兜底 ----------
+
+    def _find_window(self, title, win_class=""):
+        """按标题(子串匹配)找窗口，失败则按类名找。
+
+        v1.6 新增: 窗口标题是动态的(浏览器换页面、微信多状态)，
+        类名是稳定的(Chrome_WidgetWin_1 / Qt51514QWindowIcon 等)，
+        标题失配时用类名兜底找回窗口。
+        """
+        if title:
+            win = auto.WindowControl(searchDepth=1, SubName=title)
+            if win.Exists(2):
+                return win
+
+        if win_class:
+            best, best_score = None, -1
+            try:
+                for child in auto.GetRootControl().GetChildren():
+                    if (child.ClassName == win_class
+                            and child.ControlType == auto.ControlType.WindowControl):
+                        # 同类名多窗口时，选标题与原标题共同前缀最长的
+                        score = 0
+                        if title:
+                            for a, b in zip(child.Name or "", title):
+                                if a != b:
+                                    break
+                                score += 1
+                        if score > best_score:
+                            best, best_score = child, score
+            except Exception:
+                pass
+            if best is not None:
+                return best
+        return None
+
+    def _activate_window(self, title, win_class=""):
+        """激活窗口并返回窗口控件"""
+        win = self._find_window(title, win_class)
+        if win is None:
+            raise RuntimeError(f"找不到窗口: {title or win_class}")
+        win.SetActive()
+        time.sleep(0.5)
+        return win
+
+    # ---------- 智能点击: 元素匹配 → 窗口内位置 → 绝对坐标 ----------
 
     def _do_click(self, p):
         title = p.get("window_title", "")
+        win_class = p.get("win_class", "")
         rel_x, rel_y = p.get("rel_x"), p.get("rel_y")
         name = p.get("name", "")
         aid = p.get("automation_id", "")
 
-        # 激活目标窗口
+        # 激活目标窗口（标题失配时自动用类名兜底）
         win = None
-        if title:
-            win = self._activate_window(title)
+        if title or win_class:
+            win = self._activate_window(title, win_class)
 
-        # 策略1: 按控件名称/ID 快速匹配（微信/浏览器等自绘控件通常匹配不到）
+        # 策略1: 按控件名称/ID 匹配（原生应用有效；自绘界面名称为空自动跳过）
         if win is not None and (name or aid):
             control = self._find_control_in(win, name, aid)
             if control is not None:
@@ -247,9 +346,9 @@ class FlowRunner:
                     control.Click()
                     return
                 except Exception:
-                    pass  # 匹配到了但点击失败，走兜底
+                    pass  # 匹配到但点击失败，走兜底
 
-        # 策略2: 按窗口内相对位置点击（兜底，窗口挪动不影响准确性）
+        # 策略2: 按窗口内相对位置点击（自绘界面主力方案，窗口挪动不影响）
         if win is not None and rel_x is not None and rel_y is not None:
             try:
                 win.Click(x=int(rel_x), y=int(rel_y))
@@ -257,14 +356,14 @@ class FlowRunner:
             except Exception:
                 pass
 
-        # 策略3: 旧版绝对坐标（兼容 v1.0 流程文件）
+        # 策略3: 绝对坐标（最后防线）
         if p.get("x") is not None:
             pyautogui.click(int(p["x"]), int(p["y"]))
             return
 
         raise RuntimeError(
             f"点击失败: 控件 [{name or aid or '?'}] 未找到"
-            + ("，且无窗口内备用位置" if rel_x is None else "，备用位置点击也失败")
+            + ("，且无备用坐标" if rel_x is None else "，备用位置点击也失败")
         )
 
     def _find_control_in(self, win, name, aid):
@@ -285,20 +384,20 @@ class FlowRunner:
             pass
         return None
 
-    # ---------- 坐标点击：优先窗口内相对坐标 ----------
+    # ---------- 坐标点击: 优先窗口内相对坐标 ----------
 
     def _do_click_pos(self, p):
         title = p.get("window_title", "")
+        win_class = p.get("win_class", "")
         rel_x, rel_y = p.get("rel_x"), p.get("rel_y")
 
-        if title and rel_x is not None and rel_y is not None:
-            # 窗口内相对坐标：窗口移动后依然点得准
-            win = self._activate_window(title)
+        if (title or win_class) and rel_x is not None and rel_y is not None:
+            # 窗口内相对坐标: 窗口移动、标题变化后依然点得准
+            win = self._activate_window(title, win_class)
             try:
                 win.Click(x=int(rel_x), y=int(rel_y))
                 return
             except Exception:
-                # uiautomation 点击失败，退回 pyautogui 绝对坐标
                 rect = win.BoundingRectangle
                 pyautogui.click(rect.left + int(rel_x), rect.top + int(rel_y))
                 return
@@ -308,20 +407,12 @@ class FlowRunner:
 
     # ---------- 其他操作 ----------
 
-    def _activate_window(self, title):
-        """激活窗口并返回窗口控件"""
-        win = auto.WindowControl(searchDepth=1, SubName=title)
-        if not win.Exists(3):
-            raise RuntimeError(f"找不到窗口: {title}")
-        win.SetActive()
-        time.sleep(0.5)
-        return win
-
     def _do_input(self, p):
         text = p.get("text", "")
         win_title = p.get("window_title", "")
-        if win_title:
-            self._activate_window(win_title)
+        win_class = p.get("win_class", "")
+        if win_title or win_class:
+            self._activate_window(win_title, win_class)
         pyperclip.copy(text)
         time.sleep(0.2)
         pyautogui.hotkey("ctrl", "v")

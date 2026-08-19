@@ -22,7 +22,7 @@ def _is_f9_pressed():
 class RPAApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("流程自动化工具 v1.5")
+        self.root.title("流程自动化工具 v1.6")
         self.root.geometry("780x700")
         self.root.minsize(680, 580)
 
@@ -202,24 +202,34 @@ class RPAApp:
     # ==================== 捕获 ====================
 
     def _capture_click(self):
-        self.status.set("⏳ 3 秒后开始捕获…把鼠标移到目标控件上，按 F9")
+        # 递增代数号: 若上一个捕获线程还在等待 F9，会自动退出，防止重复捕获
+        self._capture_gen = getattr(self, "_capture_gen", 0) + 1
+        gen = self._capture_gen
         self._capture_stop = False
-        threading.Thread(target=self._capture_thread, daemon=True).start()
+        self.status.set("⏳ 3 秒后开始捕获…把鼠标移到目标控件上，按 F9")
+        threading.Thread(target=self._capture_thread, args=(gen,), daemon=True).start()
 
-    def _capture_thread(self):
+    def _capture_thread(self, gen):
         time.sleep(1)
+        if self._capture_gen != gen:
+            return
         self.root.after(0, self.root.iconify)
         time.sleep(2)
+        if self._capture_gen != gen:
+            self.root.after(0, self.root.deiconify)
+            return
 
         self.root.after(0, lambda: self.status.set("🎯 等待按 F9 …"))
 
         while not self._capture_stop:
+            if self._capture_gen != gen:
+                return  # 已被新的捕获任务取代
             if _is_f9_pressed():
                 time.sleep(0.15)
                 break
-            time.sleep(0.05)
+            time.sleep(0.02)
 
-        if self._capture_stop:
+        if self._capture_stop or self._capture_gen != gen:
             self.root.after(0, self.root.deiconify)
             return
 
@@ -231,35 +241,48 @@ class RPAApp:
             self.root.after(0, self._refresh_list)
 
             label = info["name"] or info["automation_id"] or info["control_type"]
-            if info["name"] or info["automation_id"]:
-                msg = f"✅ 已捕获: [{label}] @ {info['window_title']}（含位置兜底）"
+            if info["window_title"]:
+                if info["name"] or info["automation_id"]:
+                    msg = (f"✅ 已捕获: [{label}] @ {info['window_title']}"
+                           f"（含位置兜底 {info['rel_x']},{info['rel_y']}）")
+                else:
+                    msg = (f"✅ 已捕获位置 ({info['rel_x']},{info['rel_y']}) @ "
+                           f"{info['window_title']}（自绘界面，回放按位置点击）")
             else:
-                msg = (f"✅ 已捕获位置 ({info['rel_x']},{info['rel_y']}) @ "
-                       f"{info['window_title']}（控件无名，将按位置点击）")
+                msg = f"⚠️ 已捕获，但未识别到所属窗口（仅绝对坐标 {info['x']},{info['y']}）"
             self.root.after(0, lambda: self.status.set(msg))
         else:
             self.root.after(0, lambda: self.status.set("❌ 未捕获到控件，请重试"))
 
     def _capture_pos(self):
         """捕获鼠标坐标模式"""
-        self.status.set("⏳ 3 秒后开始…把鼠标移到目标位置，按 F9 记录坐标")
+        self._capture_gen = getattr(self, "_capture_gen", 0) + 1
+        gen = self._capture_gen
         self._capture_stop = False
-        threading.Thread(target=self._capture_pos_thread, daemon=True).start()
+        self.status.set("⏳ 3 秒后开始…把鼠标移到目标位置，按 F9 记录坐标")
+        threading.Thread(target=self._capture_pos_thread, args=(gen,), daemon=True).start()
 
-    def _capture_pos_thread(self):
+    def _capture_pos_thread(self, gen):
         time.sleep(1)
+        if self._capture_gen != gen:
+            return
         self.root.after(0, self.root.iconify)
         time.sleep(2)
+        if self._capture_gen != gen:
+            self.root.after(0, self.root.deiconify)
+            return
 
         self.root.after(0, lambda: self.status.set("📍 等待按 F9 记录坐标…"))
 
         while not self._capture_stop:
+            if self._capture_gen != gen:
+                return
             if _is_f9_pressed():
                 time.sleep(0.15)
                 break
-            time.sleep(0.05)
+            time.sleep(0.02)
 
-        if self._capture_stop:
+        if self._capture_stop or self._capture_gen != gen:
             self.root.after(0, self.root.deiconify)
             return
 
@@ -271,7 +294,7 @@ class RPAApp:
 
         if "window_title" in pos:
             msg = (f"✅ 已记录窗口内位置 ({pos['rel_x']},{pos['rel_y']}) @ "
-                   f"{pos['window_title']}（窗口移动不影响）")
+                   f"{pos['window_title']}（窗口移动/改名都不影响）")
         else:
             msg = f"✅ 已记录屏幕坐标: ({pos['x']}, {pos['y']})"
         self.root.after(0, lambda: self.status.set(msg))
