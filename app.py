@@ -13,9 +13,8 @@ from hotkeys import wait_for_new_f9_press
 class RPAApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("流程自动化工具 v2.0")
-        self.root.geometry("780x700")
-        self.root.minsize(680, 580)
+        self.root.title("流程自动化工具 v2.1")
+        self.root.geometry("1000x720")
 
         # 设置默认字体
         self.root.option_add("*Font", ("Microsoft YaHei UI", 10))
@@ -24,6 +23,13 @@ class RPAApp:
         self.runner = None
         self._capture_stop = False
         self._build_ui()
+        # 字体和 DPI 缩放会改变按钮的实际宽度。按界面的请求尺寸设置
+        # 最小窗口，避免“下移”等最右侧按钮在高缩放比例下被裁掉。
+        self.root.update_idletasks()
+        self.root.minsize(
+            max(780, self.root.winfo_reqwidth()),
+            max(580, self.root.winfo_reqheight()),
+        )
         self._refresh_list()
 
     # ==================== UI 构建 ====================
