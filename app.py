@@ -1,5 +1,7 @@
 """
 RPA 工具 GUI - 流程录制、编辑、运行
+
+v1.5: 新增单步测试按钮；捕获反馈增强
 """
 
 import tkinter as tk
@@ -20,9 +22,9 @@ def _is_f9_pressed():
 class RPAApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("流程自动化工具")
-        self.root.geometry("780x680")
-        self.root.minsize(680, 550)
+        self.root.title("流程自动化工具 v1.5")
+        self.root.geometry("780x700")
+        self.root.minsize(680, 580)
 
         # 设置默认字体
         self.root.option_add("*Font", ("Microsoft YaHei UI", 10))
@@ -48,6 +50,7 @@ class RPAApp:
         self.run_btn = ttk.Button(tb, text="▶  运行", command=self._run_flow)
         self.run_btn.pack(side=tk.LEFT, padx=2)
         ttk.Button(tb, text="■  停止", command=self._stop_flow).pack(side=tk.LEFT, padx=2)
+        ttk.Button(tb, text="▶ 测试选中", command=self._test_step).pack(side=tk.LEFT, padx=2)
 
         # --- 流程名 ---
         nf = ttk.Frame(self.root)
@@ -93,7 +96,9 @@ class RPAApp:
         ttk.Button(r2, text="🌐 打开网址", command=lambda: self._add("open_url")).pack(side=tk.LEFT, padx=2)
 
         # --- 状态栏 ---
-        self.status = tk.StringVar(value="就绪  |  点击 [🎯 捕获点击] 后按 F9 捕获鼠标下的控件")
+        self.status = tk.StringVar(
+            value="就绪  |  捕获点击会同时记录位置兜底，即使控件识别不到也能点中"
+        )
         ttk.Label(
             self.root, textvariable=self.status,
             relief=tk.SUNKEN, anchor=tk.W, padding=(5, 3)
@@ -155,6 +160,29 @@ class RPAApp:
         if self.runner:
             self.runner.stop()
 
+    def _test_step(self):
+        """只运行选中的那一个步骤，方便调试"""
+        sel = self.listbox.curselection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选中一个步骤")
+            return
+        idx = sel[0]
+        step = self.steps[idx]
+        self.status.set(f"🧪 测试步骤 {idx+1}: {step.describe()}")
+
+        def run_single():
+            runner = FlowRunner(
+                on_done=lambda: self.root.after(
+                    0, lambda: self.status.set(f"✅ 步骤 {idx+1} 测试成功")
+                ),
+                on_error=lambda i, s, e: self.root.after(
+                    0, lambda: self.status.set(f"❌ 步骤 {idx+1} 测试失败: {e}")
+                ),
+            )
+            runner.run([step])
+
+        threading.Thread(target=run_single, daemon=True).start()
+
     def _on_step(self, i, step):
         self.listbox.selection_clear(0, tk.END)
         self.listbox.selection_set(i)
@@ -201,10 +229,14 @@ class RPAApp:
         if info:
             self.steps.append(Step("click", **info))
             self.root.after(0, self._refresh_list)
+
             label = info["name"] or info["automation_id"] or info["control_type"]
-            self.root.after(0, lambda: self.status.set(
-                f"✅ 已捕获: [{label}] @ {info['window_title']}"
-            ))
+            if info["name"] or info["automation_id"]:
+                msg = f"✅ 已捕获: [{label}] @ {info['window_title']}（含位置兜底）"
+            else:
+                msg = (f"✅ 已捕获位置 ({info['rel_x']},{info['rel_y']}) @ "
+                       f"{info['window_title']}（控件无名，将按位置点击）")
+            self.root.after(0, lambda: self.status.set(msg))
         else:
             self.root.after(0, lambda: self.status.set("❌ 未捕获到控件，请重试"))
 
@@ -236,9 +268,13 @@ class RPAApp:
 
         self.steps.append(Step("click_pos", **pos))
         self.root.after(0, self._refresh_list)
-        self.root.after(0, lambda: self.status.set(
-            f"✅ 已记录坐标: ({pos['x']}, {pos['y']})"
-        ))
+
+        if "window_title" in pos:
+            msg = (f"✅ 已记录窗口内位置 ({pos['rel_x']},{pos['rel_y']}) @ "
+                   f"{pos['window_title']}（窗口移动不影响）")
+        else:
+            msg = f"✅ 已记录屏幕坐标: ({pos['x']}, {pos['y']})"
+        self.root.after(0, lambda: self.status.set(msg))
 
     # ==================== 步骤编辑 ====================
 
@@ -327,6 +363,8 @@ class StepEditDialog:
         self.vars = {}
         row = 0
         for key, val in step.params.items():
+            if val is None:
+                continue
             label = PARAM_LABELS.get(key, key)
             ttk.Label(frame, text=f"{label}:").grid(row=row, column=0, sticky=tk.W, pady=4)
             var = tk.StringVar(value=str(val))
