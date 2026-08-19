@@ -78,6 +78,7 @@ pyinstaller --onefile --windowed --name "flow-runner" main.py
 ├── app.py            # GUI 界面（tkinter）
 ├── engine.py         # 核心引擎（控件识别 + 三重位置兜底 + 流程执行）
 ├── diagnose.py       # 真实窗口自检脚本
+├── tests/             # 捕获兜底回归测试
 ├── requirements.txt  # 依赖
 ├── flows/            # 流程文件目录
 │   └── example_deepseek_wechat.json
@@ -93,6 +94,12 @@ pyinstaller --onefile --windowed --name "flow-runner" main.py
 
 ## 版本历史
 
+- **v1.8** — 修复捕获组件在 UI Automation 不可用时一直失败的问题：
+  - 捕获开始时先记录鼠标坐标；即使控件识别抛异常，也能生成可回放步骤
+  - 新增 Win32 WindowFromPoint 兜底，可补齐窗口标题、类名和窗口内相对坐标
+  - F9 检测同时覆盖按住和快速点按，降低快捷键漏检概率
+  - 捕获结果统一回到 GUI 主线程写入，避免 Tk 跨线程更新不稳定
+  - 新增无 UIA 场景的自动回归测试
 - **v1.6** — 修复自绘界面（微信/浏览器/Electron）捕获必然失败的缺陷：
   - 根因：`ControlFromCursor` 对自绘界面返回"窗口本身"，旧版窗口查找只向上找父级、不检查自身，导致 `window_title` 为空、兜底坐标缺失，捕获出死步骤、回放必报错
   - 修复：窗口查找改为"自身检查 → 父级链 → 进程ID"三重保障；捕获始终记录窗口标题+类名+窗口内相对位置+绝对坐标
@@ -104,10 +111,11 @@ pyinstaller --onefile --windowed --name "flow-runner" main.py
 ## 自检
 
 ```bash
+python -m unittest discover -s tests -v
 python diagnose.py
 ```
 
-在真实窗口上验证捕获/回放链路：记事本（原生控件）全链路 + 微信（自绘界面）捕获 + 标题失配兜底 + F9 检测，输出 PASS/FAIL 证据。
+单元测试覆盖 UIA 异常、原生窗口信息兜底和纯绝对坐标兜底；诊断脚本在真实窗口上验证记事本（原生控件）全链路、微信（自绘界面）捕获、标题失配兜底和 F9 检测。
 
 ## License
 

@@ -1,22 +1,15 @@
-"""
-RPA 引擎 - 负责控件识别、步骤执行、流程存取
+"""RPA 引擎 - 负责控件识别、步骤执行、流程存取。
 
-v1.6: 修复自绘界面(微信/浏览器/Electron)捕获必然失败的缺陷
-- 根因: ControlFromCursor 对自绘界面返回"窗口本身"，旧版 _find_top_window
-  只向上找父级、不检查自身，导致 window_title 为空、兜底坐标缺失，
-  捕获出来的步骤回放必然报错。
-- 修复 1: _find_top_window 先检查控件自身是否为窗口，再走父级链，
-  最后按进程 ID 兜底 —— 三重保障。
-- 修复 2: 回放时窗口匹配增加"类名兜底"（标题会变，类名不会），
-  浏览器换页面后流程依然有效。
-- 修复 3: 捕获时始终记录鼠标绝对坐标作为最后防线。
-- 修复 4: 显式声明 DPI 感知，高分屏缩放场景坐标不错位。
+v1.8: 捕获不再依赖 UI Automation 必须成功。捕获开始时先保存鼠标坐标；
+UIA 失败时再通过 Win32 WindowFromPoint 获取窗口标题、类名和相对坐标，
+即使目标程序不暴露控件树，也始终能生成可回放的点击步骤。
 """
 
 import time
 import json
 import ctypes
 import webbrowser
+from ctypes import wintypes
 
 # DPI 感知: 让 GetCursorPos/SetCursorPos 与 UIA 矩形同处物理像素空间。
 # 高分屏缩放(125%/150%)场景下若不声明，鼠标坐标会被系统虚拟化导致点击错位。
@@ -112,6 +105,70 @@ class ElementCapture:
     """从鼠标位置捕获 UI 控件信息"""
 
     @staticmethod
+    def _safe_control_value(control, attr, default=""):
+        """读取 UIA 属性；单个属性失败不应让整次捕获失败。"""
+        if control is None:
+            return default
+        try:
+            return getattr(control, attr) or default
+        except Exception:
+            return default
+
+    @staticmethod
+    def _native_window_at(x, y):
+        """用 Win32 获取坐标处的顶层窗口，不依赖 UI Automation。"""
+        try:
+            # 独立加载函数表，避免设置 argtypes 时污染 uiautomation 共用的
+            # ctypes.windll.user32 函数对象。
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+            # ctypes 默认把返回值当 32 位 int，会在 64 位 Windows 截断 HWND。
+            user32.WindowFromPoint.argtypes = [wintypes.POINT]
+            user32.WindowFromPoint.restype = wintypes.HWND
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+            user32.GetWindowTextLengthW.restype = ctypes.c_int
+            user32.GetWindowTextW.argtypes = [
+                wintypes.HWND, wintypes.LPWSTR, ctypes.c_int,
+            ]
+            user32.GetWindowTextW.restype = ctypes.c_int
+            user32.GetClassNameW.argtypes = [
+                wintypes.HWND, wintypes.LPWSTR, ctypes.c_int,
+            ]
+            user32.GetClassNameW.restype = ctypes.c_int
+            user32.GetWindowRect.argtypes = [
+                wintypes.HWND, ctypes.POINTER(wintypes.RECT),
+            ]
+            user32.GetWindowRect.restype = wintypes.BOOL
+
+            hwnd = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+            if not hwnd:
+                return None
+
+            # GA_ROOT=2：子控件句柄提升为所属顶层窗口。
+            root_hwnd = user32.GetAncestor(hwnd, 2) or hwnd
+            title_len = max(0, user32.GetWindowTextLengthW(root_hwnd))
+            title_buf = ctypes.create_unicode_buffer(title_len + 1)
+            user32.GetWindowTextW(root_hwnd, title_buf, len(title_buf))
+
+            class_buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(root_hwnd, class_buf, len(class_buf))
+
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(root_hwnd, ctypes.byref(rect)):
+                rect = None
+
+            return {
+                "hwnd": root_hwnd,
+                "title": title_buf.value,
+                "class_name": class_buf.value,
+                "rect": rect,
+            }
+        except Exception:
+            return None
+
+    @staticmethod
     def capture_at_cursor():
         """获取当前鼠标位置的控件信息。
 
@@ -120,17 +177,24 @@ class ElementCapture:
         - 鼠标位置的窗口内相对坐标 → 自绘界面的点击兜底
         - 鼠标绝对坐标 → 最后防线
         """
+        # 坐标是最终兜底，必须在任何可能失败的 UIA 调用之前记录。
+        pos = pyautogui.position()
+        control = None
+        window = None
         try:
             control = auto.ControlFromCursor()
+            if control is not None:
+                window = ElementCapture._find_top_window(control)
         except Exception:
-            return None
-        if control is None:
-            return None
+            # 管理员窗口、部分自绘应用或 UIA 服务异常时会走 Win32 兜底。
+            pass
 
-        pos = pyautogui.position()
-        window = ElementCapture._find_top_window(control)
-        win_title = window.Name if window else ""
-        win_class = window.ClassName if window else ""
+        native = ElementCapture._native_window_at(pos.x, pos.y)
+        win_title = ElementCapture._safe_control_value(window, "Name")
+        win_class = ElementCapture._safe_control_value(window, "ClassName")
+        if native:
+            win_title = win_title or native["title"]
+            win_class = win_class or native["class_name"]
 
         # 鼠标位置相对窗口左上角的偏移 —— 自绘界面回放点击的主力坐标。
         # 注意用鼠标实际位置而非控件中心: 自绘界面拿到的"控件"往往就是
@@ -143,14 +207,21 @@ class ElementCapture:
                 rel_y = pos.y - wrect.top
             except Exception:
                 pass
+        if rel_x is None and native and native["rect"] is not None:
+            rel_x = pos.x - native["rect"].left
+            rel_y = pos.y - native["rect"].top
 
         return {
             "window_title": win_title,
             "win_class": win_class,
-            "control_type": control.ControlTypeName,
-            "name": control.Name or "",
-            "automation_id": control.AutomationId or "",
-            "class_name": control.ClassName or "",
+            "control_type": ElementCapture._safe_control_value(
+                control, "ControlTypeName", "UnknownControl"
+            ),
+            "name": ElementCapture._safe_control_value(control, "Name"),
+            "automation_id": ElementCapture._safe_control_value(
+                control, "AutomationId"
+            ),
+            "class_name": ElementCapture._safe_control_value(control, "ClassName"),
             "rel_x": rel_x,
             "rel_y": rel_y,
             "x": pos.x,
@@ -216,6 +287,17 @@ class ElementCapture:
                     }
         except Exception:
             pass
+        native = ElementCapture._native_window_at(pos.x, pos.y)
+        if native and native["rect"] is not None:
+            rect = native["rect"]
+            return {
+                "window_title": native["title"],
+                "win_class": native["class_name"],
+                "rel_x": pos.x - rect.left,
+                "rel_y": pos.y - rect.top,
+                "x": pos.x,
+                "y": pos.y,
+            }
         return {"x": pos.x, "y": pos.y}
 
     @staticmethod

@@ -123,7 +123,7 @@ try:
                     runner._execute(Step("click", **info))
                     time.sleep(0.4)
                     import pyperclip
-                    pyperclip.copy("FLOW_RUNNER_V16_PROBE")
+                    pyperclip.copy("FLOW_RUNNER_V18_PROBE")
                     pyautogui.hotkey("ctrl", "v")
                     time.sleep(0.6)
                     focused = auto.GetFocusedControl()
@@ -135,7 +135,7 @@ try:
                             text = focused.GetLegacyIAccessiblePattern().Value
                         except Exception:
                             pass
-                    check("回放点击(元素路径)+输入落点", "FLOW_RUNNER_V16_PROBE" in (text or ""),
+                    check("回放点击(元素路径)+输入落点", "FLOW_RUNNER_V18_PROBE" in (text or ""),
                           f"回读文本: '{(text or '')[:40]}'")
                 except Exception as e:
                     check("回放点击(元素路径)+输入落点", False, repr(e))
@@ -189,14 +189,14 @@ try:
             check("标题失配时(旧逻辑)找不到窗口", not w.Exists(1),
                   "→ 印证: 窗口标题变化会导致回放直接失败")
 
-            # v1.6 新逻辑: 类名兜底（修复前该函数不存在）
+            # 类名兜底: 标题变化后仍能找回窗口
             runner = FlowRunner()
             if hasattr(runner, "_find_window"):
                 w2 = runner._find_window("此标题肯定不存在xyz", selfdraw.ClassName)
-                check("v1.6 类名兜底找回窗口", w2 is not None,
+                check("类名兜底找回窗口", w2 is not None,
                       f"按 class={selfdraw.ClassName} 找到 '{w2.Name[:40]}'" if w2 else "未找到")
             else:
-                check("v1.6 类名兜底找回窗口", False, "当前版本无 _find_window（v1.5 及以前）")
+                check("类名兜底找回窗口", False, "当前版本无 _find_window")
         finally:
             wb = auto.WindowControl(searchDepth=1, SubName="WorkBuddy")
             if wb.Exists(1):

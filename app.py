@@ -1,8 +1,4 @@
-"""
-RPA 工具 GUI - 流程录制、编辑、运行
-
-v1.5: 新增单步测试按钮；捕获反馈增强
-"""
+"""RPA 工具 GUI - 流程录制、编辑、运行。"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
@@ -16,13 +12,14 @@ from engine import Step, STEP_TYPES, PARAM_LABELS, ElementCapture, FlowRunner, s
 
 def _is_f9_pressed():
     """检测 F9 键是否被按下 (无需 keyboard 库)"""
-    return ctypes.windll.user32.GetAsyncKeyState(0x78) & 0x8000
+    # 高位表示当前按下，低位表示自上次查询后曾按下；同时检查可避免漏掉快按。
+    return bool(ctypes.windll.user32.GetAsyncKeyState(0x78) & 0x8001)
 
 
 class RPAApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("流程自动化工具 v1.6")
+        self.root.title("流程自动化工具 v1.8")
         self.root.geometry("780x700")
         self.root.minsize(680, 580)
 
@@ -237,22 +234,28 @@ class RPAApp:
         self.root.after(0, self.root.deiconify)
 
         if info:
-            self.steps.append(Step("click", **info))
-            self.root.after(0, self._refresh_list)
-
-            label = info["name"] or info["automation_id"] or info["control_type"]
-            if info["window_title"]:
-                if info["name"] or info["automation_id"]:
-                    msg = (f"✅ 已捕获: [{label}] @ {info['window_title']}"
-                           f"（含位置兜底 {info['rel_x']},{info['rel_y']}）")
-                else:
-                    msg = (f"✅ 已捕获位置 ({info['rel_x']},{info['rel_y']}) @ "
-                           f"{info['window_title']}（自绘界面，回放按位置点击）")
-            else:
-                msg = f"⚠️ 已捕获，但未识别到所属窗口（仅绝对坐标 {info['x']},{info['y']}）"
-            self.root.after(0, lambda: self.status.set(msg))
+            # Tk 控件与步骤列表都只在主线程更新。
+            self.root.after(0, self._finish_click_capture, info)
         else:
             self.root.after(0, lambda: self.status.set("❌ 未捕获到控件，请重试"))
+
+    def _finish_click_capture(self, info):
+        """在 Tk 主线程完成捕获结果写入和界面刷新。"""
+        self.steps.append(Step("click", **info))
+        self._refresh_list()
+
+        label = info["name"] or info["automation_id"] or info["control_type"]
+        target = info["window_title"] or info["win_class"]
+        if target:
+            if info["name"] or info["automation_id"]:
+                msg = (f"✅ 已捕获: [{label}] @ {target}"
+                       f"（含位置兜底 {info['rel_x']},{info['rel_y']}）")
+            else:
+                msg = (f"✅ 已捕获位置 ({info['rel_x']},{info['rel_y']}) @ "
+                       f"{target}（控件不可识别，回放按位置点击）")
+        else:
+            msg = f"✅ 已捕获屏幕坐标 ({info['x']},{info['y']})（绝对坐标兜底）"
+        self.status.set(msg)
 
     def _capture_pos(self):
         """捕获鼠标坐标模式"""
@@ -289,15 +292,19 @@ class RPAApp:
         pos = ElementCapture.capture_cursor_pos()
         self.root.after(0, self.root.deiconify)
 
+        self.root.after(0, self._finish_pos_capture, pos)
+
+    def _finish_pos_capture(self, pos):
+        """在 Tk 主线程完成坐标捕获结果写入和界面刷新。"""
         self.steps.append(Step("click_pos", **pos))
-        self.root.after(0, self._refresh_list)
+        self._refresh_list()
 
         if "window_title" in pos:
             msg = (f"✅ 已记录窗口内位置 ({pos['rel_x']},{pos['rel_y']}) @ "
                    f"{pos['window_title']}（窗口移动/改名都不影响）")
         else:
             msg = f"✅ 已记录屏幕坐标: ({pos['x']}, {pos['y']})"
-        self.root.after(0, lambda: self.status.set(msg))
+        self.status.set(msg)
 
     # ==================== 步骤编辑 ====================
 
