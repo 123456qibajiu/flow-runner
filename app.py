@@ -13,7 +13,7 @@ from hotkeys import wait_for_new_f9_press
 class RPAApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("流程自动化工具 v1.8.1")
+        self.root.title("流程自动化工具 v2.0")
         self.root.geometry("780x700")
         self.root.minsize(680, 580)
 
@@ -72,6 +72,7 @@ class RPAApp:
         r1.pack(fill=tk.X, pady=2)
         ttk.Button(r1, text="🎯 捕获点击", command=self._capture_click).pack(side=tk.LEFT, padx=2)
         ttk.Button(r1, text="📍 坐标点击", command=self._capture_pos).pack(side=tk.LEFT, padx=2)
+        ttk.Button(r1, text="🧭 自适应点击", command=self._capture_adaptive).pack(side=tk.LEFT, padx=2)
         ttk.Button(r1, text="✎ 编辑", command=self._edit_step).pack(side=tk.LEFT, padx=2)
         ttk.Button(r1, text="✕ 删除", command=self._delete_step).pack(side=tk.LEFT, padx=2)
         ttk.Button(r1, text="↑ 上移", command=lambda: self._move(-1)).pack(side=tk.LEFT, padx=2)
@@ -88,7 +89,7 @@ class RPAApp:
 
         # --- 状态栏 ---
         self.status = tk.StringVar(
-            value="就绪  |  捕获点击会同时记录位置兜底，即使控件识别不到也能点中"
+            value="就绪  |  窗口会缩放时请使用“自适应点击”"
         )
         ttk.Label(
             self.root, textvariable=self.status,
@@ -246,6 +247,67 @@ class RPAApp:
         else:
             msg = f"✅ 已捕获屏幕坐标 ({info['x']},{info['y']})（绝对坐标兜底）"
         self.status.set(msg)
+
+    def _capture_adaptive(self):
+        """捕获随窗口大小自动换算的点击位置。"""
+        self._capture_gen = getattr(self, "_capture_gen", 0) + 1
+        gen = self._capture_gen
+        self._capture_stop = False
+        self.status.set(
+            "⏳ 3 秒后开始…把鼠标移到目标位置，按 F9 记录自适应坐标"
+        )
+        threading.Thread(
+            target=self._capture_adaptive_thread, args=(gen,), daemon=True
+        ).start()
+
+    def _capture_adaptive_thread(self, gen):
+        time.sleep(1)
+        if self._capture_gen != gen:
+            return
+        self.root.after(0, self.root.iconify)
+        time.sleep(2)
+        if self._capture_gen != gen:
+            self.root.after(0, self.root.deiconify)
+            return
+
+        self.root.after(0, lambda: self.status.set("🧭 等待按 F9 记录自适应坐标…"))
+        wait_for_new_f9_press(
+            lambda: self._capture_stop or self._capture_gen != gen
+        )
+
+        if self._capture_stop or self._capture_gen != gen:
+            self.root.after(0, self.root.deiconify)
+            return
+
+        info = ElementCapture.capture_adaptive_pos()
+        self.root.after(0, self.root.deiconify)
+        if info:
+            self.root.after(0, self._finish_adaptive_capture, info)
+        else:
+            self.root.after(
+                0,
+                lambda: self.status.set(
+                    "❌ 未识别到目标窗口，无法生成自适应点击"
+                ),
+            )
+
+    def _finish_adaptive_capture(self, info):
+        """在主线程写入自适应点击步骤。"""
+        self.steps.append(Step("adaptive_click", **info))
+        self._refresh_list()
+
+        anchor_names = {
+            "left": "左边", "right": "右边", "ratio": "比例",
+            "top": "上边", "bottom": "下边",
+        }
+        ax = anchor_names.get(info["anchor_x"], "比例")
+        ay = anchor_names.get(info["anchor_y"], "比例")
+        target = info.get("window_title") or info.get("win_class")
+        self.status.set(
+            f"✅ 已记录自适应位置 @ {target} "
+            f"（参考窗口 {info['ref_width']}×{info['ref_height']}，"
+            f"{ax}/{ay}锚定）"
+        )
 
     def _capture_pos(self):
         """捕获鼠标坐标模式"""

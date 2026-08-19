@@ -147,6 +147,88 @@ class ElementCaptureFallbackTests(unittest.TestCase):
         self.assertEqual(_FakeUIAutomationInitializer.initialized, 1)
         self.assertEqual(_FakeUIAutomationInitializer.uninitialized, 1)
 
+    def test_adaptive_capture_anchors_bottom_right_controls(self):
+        base = {
+            "window_title": "Codex",
+            "win_class": "Chrome_WidgetWin_1",
+            "rel_x": 950,
+            "rel_y": 760,
+            "ref_width": 1000,
+            "ref_height": 800,
+            "x": 1050,
+            "y": 810,
+        }
+        with mock.patch.object(
+            engine.ElementCapture, "capture_cursor_pos", return_value=base
+        ):
+            info = engine.ElementCapture.capture_adaptive_pos()
+
+        self.assertEqual(info["anchor_x"], "right")
+        self.assertEqual(info["anchor_y"], "bottom")
+        self.assertEqual(info["right_offset"], 50)
+        self.assertEqual(info["bottom_offset"], 40)
+        self.assertAlmostEqual(info["ratio_x"], 0.95)
+        self.assertAlmostEqual(info["ratio_y"], 0.95)
+
+    def test_adaptive_capture_uses_ratios_in_middle_region(self):
+        base = {
+            "window_title": "浏览器",
+            "rel_x": 500,
+            "rel_y": 300,
+            "ref_width": 1000,
+            "ref_height": 600,
+        }
+        with mock.patch.object(
+            engine.ElementCapture, "capture_cursor_pos", return_value=base
+        ):
+            info = engine.ElementCapture.capture_adaptive_pos()
+
+        self.assertEqual(info["anchor_x"], "ratio")
+        self.assertEqual(info["anchor_y"], "ratio")
+        self.assertEqual((info["ratio_x"], info["ratio_y"]), (0.5, 0.5))
+
+    def test_adaptive_capture_requires_a_window(self):
+        with mock.patch.object(
+            engine.ElementCapture, "capture_cursor_pos",
+            return_value={"x": 10, "y": 20},
+        ):
+            self.assertIsNone(engine.ElementCapture.capture_adaptive_pos())
+
+    def test_adaptive_replay_keeps_bottom_right_offsets_after_resize(self):
+        clicks = []
+        window = SimpleNamespace(
+            BoundingRectangle=SimpleNamespace(
+                left=100, top=50, right=1300, bottom=950
+            ),
+            Click=lambda x, y: clicks.append((x, y)),
+        )
+        params = {
+            "window_title": "Codex",
+            "win_class": "Chrome_WidgetWin_1",
+            "rel_x": 950,
+            "rel_y": 760,
+            "ref_width": 1000,
+            "ref_height": 800,
+            "ratio_x": 0.95,
+            "ratio_y": 0.95,
+            "right_offset": 50,
+            "bottom_offset": 40,
+            "anchor_x": "right",
+            "anchor_y": "bottom",
+        }
+        runner = engine.FlowRunner()
+        with mock.patch.object(runner, "_activate_window", return_value=window):
+            runner._do_adaptive_click(params)
+
+        self.assertEqual(clicks, [(1150, 860)])
+
+    def test_adaptive_axis_scales_middle_and_clamps_edges(self):
+        resolve = engine.FlowRunner._resolve_adaptive_axis
+        self.assertEqual(resolve(1200, "ratio", 0, 0, 0.5), 600)
+        self.assertEqual(resolve(1200, "left", 40, 0, 0), 40)
+        self.assertEqual(resolve(1200, "right", 0, 50, 0), 1150)
+        self.assertEqual(resolve(100, "right", 0, -20, 0), 99)
+
 
 if __name__ == "__main__":
     unittest.main()

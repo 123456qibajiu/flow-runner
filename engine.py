@@ -1,7 +1,7 @@
 """RPA 引擎 - 负责控件识别、步骤执行、流程存取。
 
-v1.8.1: 所有可能在后台线程执行的 UI Automation 入口都会在当前线程
-初始化并释放 COM，修复 WinError -2147221008（尚未调用 CoInitialize）。
+v2.0: 新增自适应点击。捕获窗口尺寸、百分比坐标和边缘距离，
+回放时根据窗口当前尺寸与自动锚点重新计算点击位置。
 """
 
 import time
@@ -40,6 +40,7 @@ def _with_uiautomation_initialized(func):
 STEP_TYPES = {
     "click": "智能点击",
     "click_pos": "坐标点击",
+    "adaptive_click": "自适应点击",
     "input_text": "输入文字",
     "hotkey": "快捷键",
     "wait": "等待",
@@ -62,6 +63,14 @@ PARAM_LABELS = {
     "y": "Y 坐标",
     "rel_x": "窗口内X",
     "rel_y": "窗口内Y",
+    "ratio_x": "横向比例",
+    "ratio_y": "纵向比例",
+    "right_offset": "距右边",
+    "bottom_offset": "距下边",
+    "ref_width": "捕获窗口宽度",
+    "ref_height": "捕获窗口高度",
+    "anchor_x": "横向锚点",
+    "anchor_y": "纵向锚点",
 }
 
 
@@ -93,6 +102,14 @@ class Step:
             if p.get("window_title"):
                 return f'窗口内点击 ({p.get("rel_x")},{p.get("rel_y")}) @ {p.get("window_title")}'
             return f'坐标点击 ({p.get("x", "?")}, {p.get("y", "?")})'
+        elif t == "adaptive_click":
+            anchors = {
+                "left": "左", "right": "右", "ratio": "比例",
+                "top": "上", "bottom": "下",
+            }
+            ax = anchors.get(p.get("anchor_x"), "比例")
+            ay = anchors.get(p.get("anchor_y"), "比例")
+            return f'自适应点击 [{ax}/{ay}锚定] @ {p.get("window_title", "?")}'
         elif t == "input_text":
             text = p.get("text", "")
             display = text[:30] + ("..." if len(text) > 30 else "")
@@ -304,6 +321,8 @@ class ElementCapture:
                         "win_class": window.ClassName,
                         "rel_x": pos.x - win_rect.left,
                         "rel_y": pos.y - win_rect.top,
+                        "ref_width": win_rect.right - win_rect.left,
+                        "ref_height": win_rect.bottom - win_rect.top,
                         "x": pos.x,
                         "y": pos.y,
                     }
@@ -317,10 +336,46 @@ class ElementCapture:
                 "win_class": native["class_name"],
                 "rel_x": pos.x - rect.left,
                 "rel_y": pos.y - rect.top,
+                "ref_width": rect.right - rect.left,
+                "ref_height": rect.bottom - rect.top,
                 "x": pos.x,
                 "y": pos.y,
             }
         return {"x": pos.x, "y": pos.y}
+
+    @staticmethod
+    def _axis_anchor(position, length, start_name, end_name):
+        """靠近边缘时固定边距，中间区域按窗口尺寸比例缩放。"""
+        ratio = position / length
+        if ratio <= 1 / 3:
+            return start_name
+        if ratio >= 2 / 3:
+            return end_name
+        return "ratio"
+
+    @staticmethod
+    def capture_adaptive_pos():
+        """捕获可随窗口移动和缩放自动换算的点击位置。"""
+        info = ElementCapture.capture_cursor_pos()
+        width = info.get("ref_width")
+        height = info.get("ref_height")
+        rel_x, rel_y = info.get("rel_x"), info.get("rel_y")
+        if not width or not height or rel_x is None or rel_y is None:
+            return None
+
+        info.update({
+            "ratio_x": rel_x / width,
+            "ratio_y": rel_y / height,
+            "right_offset": width - rel_x,
+            "bottom_offset": height - rel_y,
+            "anchor_x": ElementCapture._axis_anchor(
+                rel_x, width, "left", "right"
+            ),
+            "anchor_y": ElementCapture._axis_anchor(
+                rel_y, height, "top", "bottom"
+            ),
+        })
+        return info
 
     @staticmethod
     @_with_uiautomation_initialized
@@ -374,6 +429,8 @@ class FlowRunner:
             self._do_click(p)
         elif t == "click_pos":
             self._do_click_pos(p)
+        elif t == "adaptive_click":
+            self._do_adaptive_click(p)
         elif t == "input_text":
             self._do_input(p)
         elif t == "hotkey":
@@ -510,6 +567,56 @@ class FlowRunner:
 
         # 绝对坐标（v1.0 兼容或捕获时未识别到窗口）
         pyautogui.click(int(p.get("x", 0)), int(p.get("y", 0)))
+
+    # ---------- 自适应点击: 边缘锚定 + 中间区域按比例 ----------
+
+    @staticmethod
+    def _resolve_adaptive_axis(length, anchor, start_offset, end_offset, ratio):
+        """根据当前窗口长度和捕获锚点计算单轴坐标。"""
+        length = max(1, int(length))
+        if anchor in ("left", "top"):
+            value = float(start_offset)
+        elif anchor in ("right", "bottom"):
+            value = length - float(end_offset)
+        else:
+            value = length * float(ratio)
+        return min(max(0, int(round(value))), length - 1)
+
+    def _do_adaptive_click(self, p):
+        title = p.get("window_title", "")
+        win_class = p.get("win_class", "")
+        if not (title or win_class):
+            raise RuntimeError("自适应点击失败: 未记录目标窗口")
+
+        win = self._activate_window(title, win_class)
+        rect = win.BoundingRectangle
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        if width <= 0 or height <= 0:
+            raise RuntimeError("自适应点击失败: 目标窗口尺寸无效")
+
+        ref_width = max(1, int(p.get("ref_width", width)))
+        ref_height = max(1, int(p.get("ref_height", height)))
+        rel_x = float(p.get("rel_x", 0))
+        rel_y = float(p.get("rel_y", 0))
+        ratio_x = float(p.get("ratio_x", rel_x / ref_width))
+        ratio_y = float(p.get("ratio_y", rel_y / ref_height))
+        right_offset = float(p.get("right_offset", ref_width - rel_x))
+        bottom_offset = float(p.get("bottom_offset", ref_height - rel_y))
+
+        x = self._resolve_adaptive_axis(
+            width, p.get("anchor_x", "ratio"),
+            rel_x, right_offset, ratio_x,
+        )
+        y = self._resolve_adaptive_axis(
+            height, p.get("anchor_y", "ratio"),
+            rel_y, bottom_offset, ratio_y,
+        )
+
+        try:
+            win.Click(x=x, y=y)
+        except Exception:
+            pyautogui.click(rect.left + x, rect.top + y)
 
     # ---------- 其他操作 ----------
 
