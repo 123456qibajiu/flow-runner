@@ -94,6 +94,10 @@ pyinstaller --onefile --windowed --name "flow-runner" main.py
 
 ## 版本历史
 
+- **v1.8.1** — 修复 v1.8 后台线程与 F9 热键问题：
+  - 捕获线程和流程运行线程会成对初始化/释放 UI Automation COM，解决“尚未调用 CoInitialize”
+  - F9 改为等待一次全新的按下动作，忽略残留状态，不再未按键就提前结束捕获
+  - 真实窗口诊断改为在后台线程回放，覆盖与 GUI 相同的执行路径
 - **v1.8** — 修复捕获组件在 UI Automation 不可用时一直失败的问题：
   - 捕获开始时先记录鼠标坐标；即使控件识别抛异常，也能生成可回放步骤
   - 新增 Win32 WindowFromPoint 兜底，可补齐窗口标题、类名和窗口内相对坐标

@@ -4,22 +4,16 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import threading
 import time
-import ctypes
 import os
 
 from engine import Step, STEP_TYPES, PARAM_LABELS, ElementCapture, FlowRunner, save_flow, load_flow
-
-
-def _is_f9_pressed():
-    """检测 F9 键是否被按下 (无需 keyboard 库)"""
-    # 高位表示当前按下，低位表示自上次查询后曾按下；同时检查可避免漏掉快按。
-    return bool(ctypes.windll.user32.GetAsyncKeyState(0x78) & 0x8001)
+from hotkeys import wait_for_new_f9_press
 
 
 class RPAApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("流程自动化工具 v1.8")
+        self.root.title("流程自动化工具 v1.8.1")
         self.root.geometry("780x700")
         self.root.minsize(680, 580)
 
@@ -218,13 +212,9 @@ class RPAApp:
 
         self.root.after(0, lambda: self.status.set("🎯 等待按 F9 …"))
 
-        while not self._capture_stop:
-            if self._capture_gen != gen:
-                return  # 已被新的捕获任务取代
-            if _is_f9_pressed():
-                time.sleep(0.15)
-                break
-            time.sleep(0.02)
+        wait_for_new_f9_press(
+            lambda: self._capture_stop or self._capture_gen != gen
+        )
 
         if self._capture_stop or self._capture_gen != gen:
             self.root.after(0, self.root.deiconify)
@@ -277,13 +267,9 @@ class RPAApp:
 
         self.root.after(0, lambda: self.status.set("📍 等待按 F9 记录坐标…"))
 
-        while not self._capture_stop:
-            if self._capture_gen != gen:
-                return
-            if _is_f9_pressed():
-                time.sleep(0.15)
-                break
-            time.sleep(0.02)
+        wait_for_new_f9_press(
+            lambda: self._capture_stop or self._capture_gen != gen
+        )
 
         if self._capture_stop or self._capture_gen != gen:
             self.root.after(0, self.root.deiconify)

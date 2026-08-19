@@ -18,6 +18,7 @@ import pyautogui
 
 sys.path.insert(0, '.')
 from engine import ElementCapture, FlowRunner, Step
+from hotkeys import wait_for_new_f9_press
 
 RESULTS = []
 
@@ -31,6 +32,23 @@ def section(title):
     print("\n" + "=" * 62)
     print(f" {title}")
     print("=" * 62)
+
+
+def run_step_in_thread(step, timeout=5):
+    """按 GUI 的真实方式在后台线程运行一步，并返回 (成功, 详情)。"""
+    result = {"done": False, "error": ""}
+    runner = FlowRunner(
+        on_done=lambda: result.update(done=True),
+        on_error=lambda _i, _s, err: result.update(error=err),
+    )
+    worker = threading.Thread(target=runner.run, args=([step],), daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        return False, "后台线程执行超时"
+    if result["error"]:
+        return False, result["error"]
+    return result["done"], "后台线程 COM 初始化与回放完成"
 
 
 # 保存现场（鼠标位置、剪贴板），测试结束后恢复
@@ -67,9 +85,11 @@ try:
     np_win = None
     deadline = time.time() + 6
     while time.time() < deadline:
-        for kw in ("记事本", "Notepad", "无标题"):
-            w = auto.WindowControl(searchDepth=1, SubName=kw)
-            if w.Exists(0.3):
+        for w in auto.GetRootControl().GetChildren():
+            title = (w.Name or "").strip()
+            if (w.ClassName == "Notepad"
+                    and not title.startswith("*")
+                    and ("无标题" in title or "Untitled" in title)):
                 np_win = w
                 break
         if np_win is not None:
@@ -118,9 +138,10 @@ try:
 
             # --- 回放: 元素匹配路径 + 输入落点验证 ---
             if info:
-                runner = FlowRunner()
                 try:
-                    runner._execute(Step("click", **info))
+                    ok_thread, thread_detail = run_step_in_thread(Step("click", **info))
+                    if not ok_thread:
+                        raise RuntimeError(thread_detail)
                     time.sleep(0.4)
                     import pyperclip
                     pyperclip.copy("FLOW_RUNNER_V18_PROBE")
@@ -135,27 +156,34 @@ try:
                             text = focused.GetLegacyIAccessiblePattern().Value
                         except Exception:
                             pass
-                    check("回放点击(元素路径)+输入落点", "FLOW_RUNNER_V18_PROBE" in (text or ""),
-                          f"回读文本: '{(text or '')[:40]}'")
+                    check("后台线程回放(元素路径)+输入落点", "FLOW_RUNNER_V18_PROBE" in (text or ""),
+                          f"{thread_detail}; 回读文本: '{(text or '')[:40]}'")
                 except Exception as e:
-                    check("回放点击(元素路径)+输入落点", False, repr(e))
+                    check("后台线程回放(元素路径)+输入落点", False, repr(e))
 
                 # --- 回放: 模拟自绘界面（名称全空）→ 位置兜底路径 ---
                 fb = dict(info)
                 fb["name"] = ""
                 fb["automation_id"] = ""
                 try:
-                    runner._execute(Step("click", **fb))
+                    ok_thread, thread_detail = run_step_in_thread(Step("click", **fb))
+                    if not ok_thread:
+                        raise RuntimeError(thread_detail)
                     time.sleep(0.3)
                     focused = auto.GetFocusedControl()
                     ok_fb = focused.ControlTypeName in ("EditControl", "DocumentControl")
-                    check("回放点击(位置兜底路径)", ok_fb,
-                          f"焦点控件: {focused.ControlTypeName} '{focused.Name}'")
+                    check("后台线程回放(位置兜底路径)", ok_fb,
+                          f"{thread_detail}; 焦点控件: {focused.ControlTypeName} '{focused.Name}'")
                 except Exception as e:
-                    check("回放点击(位置兜底路径)", False, repr(e))
+                    check("后台线程回放(位置兜底路径)", False, repr(e))
         finally:
+            # 只清理本次测试的空白标签页，不终止可能承载用户其他标签的进程。
             try:
-                proc.kill()
+                np_win.SetActive()
+                pyautogui.hotkey("ctrl", "a")
+                pyautogui.press("backspace")
+                time.sleep(0.2)
+                np_win.GetWindowPattern().Close()
             except Exception:
                 pass
 
@@ -211,15 +239,16 @@ try:
         time.sleep(0.08)
         pyautogui.keyUp("f9")
 
+    # 先释放可能由上次诊断残留的合成按键，再等待一次全新的按下。
+    pyautogui.keyUp("f9")
+    time.sleep(0.1)
     threading.Thread(target=_press_f9, daemon=True).start()
     start = time.time()
-    detected = False
-    while time.time() - start < 3:
-        if ctypes.windll.user32.GetAsyncKeyState(0x78) & 0x8000:
-            detected = True
-            break
-        time.sleep(0.05)
-    check("F9 快速点按可被轮询捕获", detected, f"耗时 {time.time() - start:.2f}s")
+    detected = wait_for_new_f9_press(
+        cancelled=lambda: time.time() - start >= 3,
+        poll_interval=0.01,
+    )
+    check("F9 只响应释放后的新按下动作", detected, f"耗时 {time.time() - start:.2f}s")
 
 finally:
     # 恢复现场

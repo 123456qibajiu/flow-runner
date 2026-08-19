@@ -1,8 +1,7 @@
 """RPA 引擎 - 负责控件识别、步骤执行、流程存取。
 
-v1.8: 捕获不再依赖 UI Automation 必须成功。捕获开始时先保存鼠标坐标；
-UIA 失败时再通过 Win32 WindowFromPoint 获取窗口标题、类名和相对坐标，
-即使目标程序不暴露控件树，也始终能生成可回放的点击步骤。
+v1.8.1: 所有可能在后台线程执行的 UI Automation 入口都会在当前线程
+初始化并释放 COM，修复 WinError -2147221008（尚未调用 CoInitialize）。
 """
 
 import time
@@ -10,6 +9,7 @@ import json
 import ctypes
 import webbrowser
 from ctypes import wintypes
+from functools import wraps
 
 # DPI 感知: 让 GetCursorPos/SetCursorPos 与 UIA 矩形同处物理像素空间。
 # 高分屏缩放(125%/150%)场景下若不声明，鼠标坐标会被系统虚拟化导致点击错位。
@@ -24,6 +24,15 @@ except Exception:
 import uiautomation as auto
 import pyautogui
 import pyperclip
+
+
+def _with_uiautomation_initialized(func):
+    """确保每个调用 UIA 的线程都有独立且成对的 COM 生命周期。"""
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        with auto.UIAutomationInitializerInThread():
+            return func(*args, **kwargs)
+    return wrapped
 
 
 # ==================== 步骤类型定义 ====================
@@ -169,6 +178,7 @@ class ElementCapture:
             return None
 
     @staticmethod
+    @_with_uiautomation_initialized
     def capture_at_cursor():
         """获取当前鼠标位置的控件信息。
 
@@ -211,17 +221,28 @@ class ElementCapture:
             rel_x = pos.x - native["rect"].left
             rel_y = pos.y - native["rect"].top
 
+        # 微信/Qt/Electron 常把“整个窗口”作为鼠标下控件返回。窗口名不是
+        # 按钮选择器；保留它会让回放误点窗口中心，必须强制走相对位置。
+        selector_control = control
+        try:
+            if control.ControlType == auto.ControlType.WindowControl:
+                selector_control = None
+        except Exception:
+            pass
+
         return {
             "window_title": win_title,
             "win_class": win_class,
             "control_type": ElementCapture._safe_control_value(
                 control, "ControlTypeName", "UnknownControl"
             ),
-            "name": ElementCapture._safe_control_value(control, "Name"),
+            "name": ElementCapture._safe_control_value(selector_control, "Name"),
             "automation_id": ElementCapture._safe_control_value(
-                control, "AutomationId"
+                selector_control, "AutomationId"
             ),
-            "class_name": ElementCapture._safe_control_value(control, "ClassName"),
+            "class_name": ElementCapture._safe_control_value(
+                selector_control, "ClassName"
+            ),
             "rel_x": rel_x,
             "rel_y": rel_y,
             "x": pos.x,
@@ -268,6 +289,7 @@ class ElementCapture:
         return None
 
     @staticmethod
+    @_with_uiautomation_initialized
     def capture_cursor_pos():
         """获取当前鼠标坐标（自动绑定所在窗口，记录类名）"""
         pos = pyautogui.position()
@@ -301,6 +323,7 @@ class ElementCapture:
         return {"x": pos.x, "y": pos.y}
 
     @staticmethod
+    @_with_uiautomation_initialized
     def list_windows():
         """列出所有可见顶层窗口标题"""
         result = []
@@ -326,6 +349,7 @@ class FlowRunner:
     def stop(self):
         self._stop = True
 
+    @_with_uiautomation_initialized
     def run(self, steps):
         self._stop = False
         for i, step in enumerate(steps):
