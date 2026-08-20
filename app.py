@@ -9,11 +9,15 @@ import os
 from engine import Step, STEP_TYPES, PARAM_LABELS, ElementCapture, FlowRunner, save_flow, load_flow
 from hotkeys import wait_for_new_f9_press
 
+APP_VERSION = "2.18"
+PROJECT_URL = "https://github.com/123456qibajiu/flow-runner"
+BILIBILI_ACCOUNT = "白给超棒的好吗"
+
 
 class RPAApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("流程自动化工具 v2.1")
+        self.root.title(f"流程自动化工具 v{APP_VERSION}")
         self.root.geometry("1000x720")
 
         # 设置默认字体
@@ -22,6 +26,7 @@ class RPAApp:
         self.steps = []
         self.runner = None
         self._capture_stop = False
+        self._build_menu()
         self._build_ui()
         # 字体和 DPI 缩放会改变按钮的实际宽度。按界面的请求尺寸设置
         # 最小窗口，避免“下移”等最右侧按钮在高缩放比例下被裁掉。
@@ -33,6 +38,23 @@ class RPAApp:
         self._refresh_list()
 
     # ==================== UI 构建 ====================
+
+    def _build_menu(self):
+        menubar = tk.Menu(self.root, tearoff=False)
+        help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(label="关于", command=self._show_about)
+        menubar.add_cascade(label="帮助", menu=help_menu)
+        self.root.config(menu=menubar)
+
+    def _show_about(self):
+        messagebox.showinfo(
+            "关于",
+            "流程自动化工具（flow-runner）\n\n"
+            f"当前版本：v{APP_VERSION}\n"
+            "Windows 桌面流程录制与自动回放工具\n\n"
+            f"欢迎关注B站：{BILIBILI_ACCOUNT}\n\n"
+            f"GitHub：{PROJECT_URL}",
+        )
 
     def _build_ui(self):
         # --- 工具栏 ---
